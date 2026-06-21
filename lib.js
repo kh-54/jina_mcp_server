@@ -2,18 +2,57 @@ const https = require("node:https");
 const { McpServer } = require("@modelcontextprotocol/sdk/server/mcp.js");
 const z = require("zod");
 
-function callJina(url) {
+const DEFAULT_TIMEOUT = process.env.MCP_JINA_TIMEOUT || "30";
+const JINA_API_KEY = process.env.JINA_API_KEY;
+
+function isLikelyEmptyShell(content) {
+  const match = content.match(/Markdown Content:\s*\n([\s\S]*)/);
+  const body = match ? match[1].trim() : "";
+  return body.length < 30;
+}
+
+function fetchJina(url, timeoutSec) {
   const target = "https://r.jina.ai/" + url;
+  const headers = {
+    Accept: "text/plain",
+    "X-Timeout": String(timeoutSec),
+    "X-No-Cache": "true",
+  };
+
+  if (JINA_API_KEY) {
+    headers.Authorization = `Bearer ${JINA_API_KEY}`;
+  }
 
   return new Promise((resolve, reject) => {
-    https
-      .get(target, (res) => {
+    const req = https.request(
+      target,
+      { method: "GET", headers },
+      (res) => {
         let data = "";
         res.on("data", (chunk) => (data += chunk));
-        res.on("end", () => resolve(data));
-      })
-      .on("error", reject);
+        res.on("end", () => {
+          if (res.statusCode >= 400) {
+            reject(new Error(`Jina Reader HTTP ${res.statusCode}: ${data.slice(0, 300)}`));
+            return;
+          }
+          resolve(data);
+        });
+      }
+    );
+    req.on("error", reject);
+    req.end();
   });
+}
+
+async function callJina(url) {
+  const content = await fetchJina(url, DEFAULT_TIMEOUT);
+
+  // Dynamic pages (e.g. d.biji.com) may return a shell on first pass; retry with longer wait.
+  if (isLikelyEmptyShell(content) && Number(DEFAULT_TIMEOUT) < 60) {
+    return fetchJina(url, "60");
+  }
+
+  return content;
 }
 
 function createMcpServer() {
@@ -46,4 +85,4 @@ function createMcpServer() {
   return server;
 }
 
-module.exports = { createMcpServer };
+module.exports = { createMcpServer, callJina, isLikelyEmptyShell };
